@@ -1,0 +1,218 @@
+#!/bin/bash
+# 2019-07-02 ph@cesnet.cz
+
+# Bash does not allow array in array (to represent lines of words), nor in associative array
+# (to represent list data for our substition variables). Oh well.
+# So for list data for substitutions I'm (ab)using standard bash variables, prefixed with
+# _4_ and _6_ respectively, while for line storage I'm using plain scalars, however safely
+# quoted and dequoted before and after use.
+
+# Also, bash does not allow to return arbitrary strings from functions. Oh well.
+# Usual trick is echo "$res", and calling through $(callme), however that means
+# spawning the subshell and whatnot, which is slow and meh. So I'll risk god
+# killing a kitten and use global variables sometimes.
+
+declare -g -a output='()'   # list of iptables commands to run at the end
+declare -g -a context='()'  # stack of sub/subend substitution identifiers
+declare -g last_name_def    # holds last substituion name definition (for sub)
+
+# So you can use "dict I.P.v.4 _OMIT_" to force skipping something.
+declare -g -a _4__OMIT_='()'
+declare -g -a _6__OMIT_='()'
+
+flee() {
+    echo -e "Error: $1" >&2
+    exit $2
+}
+
+# Helpers to create differences dictionaries
+
+check_redefinition() {
+    if declare -p "_4_$1" >/dev/null 2>&1 || declare -p "_6_$1" >/dev/null 2>&1; then
+        flee "$1 defined multiple times." 252
+    fi
+}
+
+dict() {
+    # Creates two way substitution. On the 'ipt' run, the instance of the first argument will
+    # cause the call to be repeated for iptables and ip6tables with second and third arguments
+    # respectively. You can also use _OMIT_ to signal that some version should not run altogether.
+
+    # This is also compatible with the ~2012 version of the script, however it is recommended
+    # to use iplist for IP addresses instead (and drop possible ::1 placeholders altogether).
+    check_redefinition "$1"
+    add_to_context "$1"
+    declare -g -a _4_$1="( \"$2\" )"
+    declare -g -a _6_$1="( \"$3\" )"
+}
+
+list() {
+    # Creates general substitution. On the 'ipt' run, the instance of the first argument will cause
+    # the call to get repeated multiple times with the string replaced by following arguments
+    # successively.
+    check_redefinition "$1"
+    add_to_context "$1"
+    # Global variable with dynamic name cannot be declared and assigned as array in one step. Oh well.
+    declare -g -a _4_$1='()'
+    declare -g -a _6_$1='()'
+    declare -n arr4=_4_$1
+    declare -n arr6=_6_$1
+    shift
+    arr4=( "$@" )
+    arr6=( "$@" )
+}
+
+iplist() {
+    # Creates IP address substitution. On the 'ipt' run, the instance of the first argument will
+    # cause the call to get repeated multiple times with the string replaced by following arguments
+    # successively, taking into account that IPv4 addresses make sense only for 'iptables' and
+    # IPv6 addresses only for 'ip6tables'.
+    check_redefinition "$1"
+    add_to_context "$1"
+    declare -g -a _4_$1='()'
+    declare -g -a _6_$1='()'
+    declare -n arr4=_4_$1
+    declare -n arr6=_6_$1
+    shift
+    for t in "$@"; do
+        [[ $t != *:* ]] && arr4+=( "$t" )
+        [[ $t != *.*.*.* ]] && arr6+=( "$t" )
+    done
+}
+
+sub() {
+    # Everything between sub/endsub will be also automatically added into lastly defined
+    # substitution list.
+    if [[ -n "$last_name_def" ]]; then
+        context=( "${context[@]}" "$last_name_def" )
+    else
+        flee "Sub context can be created only after dict/list/iplist." 254
+    fi
+}
+
+endsub() {
+    if [[ ${#context[@]} -gt 0 ]]; then
+        context=( "${context[@]:0:${#context[@]}-1}" )
+    else
+        flee "No sub context to close." 253
+    fi
+}
+
+add_to_context() {
+    # Helper to automatically update relevant list between sub/nosub
+    last_name_def="$1"
+    [[ ${#context[@]} -eq 0 ]] && return
+    ctx="${context[${#context[@]}-1]}"
+    declare -n arr4=_4_${ctx}
+    declare -n arr6=_6_${ctx}
+    arr4+=( $1 )
+    arr6+=( $1 )
+}
+
+quote_line() {
+    # Return string with arguments safely quoted (if they contain unsafe chars),
+    # so eval on the resulting line is safe.
+    local ret=''
+    local delim=''
+    for p in "$@"; do
+        if [[ $p =~ ^[a-zA-Z0-9,._+:@%/-]+$ ]]; then
+            local quoted="$p"
+        else
+            local quoted=${p//\'/\'\\\'\'}
+            quoted="'$quoted'"
+        fi
+        ret="${ret}${delim}$quoted"
+        delim=' '
+    done
+    __quoted="$ret"
+}
+
+ipt_main() {
+    prefix="_$1_"
+    iptables="$2"
+    shift; shift
+    quote_line "$@"; newlist=( "$__quoted" )
+    oldlist=()
+    any_was_expanded=yes
+    while [[ -n $any_was_expanded ]]; do    # repeat until no new substitutions
+        oldlist=( "${newlist[@]}" ); newlist=()
+        any_was_expanded=
+        for line in "${oldlist[@]}"; do     # process all lines from oldlist to newlist
+            eval tokens=( "$line" )         # all lines are explicitly quoted so this is safe now
+            line_was_expanded=
+            for i in "${!tokens[@]}"; do
+                subst_name="${prefix}${tokens[$i]}"  # compute name for indirect variable expansion
+                # Using declare -p to check variable existence, because ${subst_name+x}
+                # expansion seems to not work correctly on arrays. Oh well.
+                if [[ $subst_name =~ ^_[a-zA-Z0-9_]+_$ ]]; then
+                    if declare -p "${subst_name}" >/dev/null 2>&1; then
+                        line_was_expanded=yes; any_was_expanded=yes
+                        declare -n subst_list="$subst_name"
+                        for subst in "${subst_list[@]}"; do   # now get substitution list from correct variable
+                            new_tokens=( "${tokens[@]}" )   # get copy of current line...
+                            new_tokens[$i]="$subst"         #    ... and replace just the substitution
+                            quote_line "${new_tokens[@]}"; newlist+=( "$__quoted" )
+                        done
+                        break                   # end current line processing, leave it for next pass
+                    else
+                        flee "${tokens[$i]} is used but is not defined. Related line is:\n$line\n" 253
+                    fi
+                fi
+            done
+            # no substitutions encountered, copy line verbatim
+            [[ -z $line_was_expanded ]] && newlist+=( "$line" )
+        done
+    done
+    for line in "${newlist[@]}"; do
+        output+=( "$iptables $line" )
+    done
+}
+
+ipt() {
+    quote_line "$@"
+    output+=( "" "# ipt $__quoted" )   # For debugging
+    ipt_main 4 /sbin/iptables "$@"
+    ipt_main 6 /sbin/ip6tables "$@"
+}
+
+# Main functions
+
+debug() {
+    echo "# Substitutions"
+    for v in "${!_4_@}" "${!_6_@}"; do
+        declare -p "$v"
+    done
+    echo "# Rules"
+    ipt --flush
+    ipt --delete-chain
+    rules
+    local IFS=$'\n'
+    echo "${output[*]}"
+}
+
+start() {
+    ipt --flush
+    ipt --delete-chain
+    rules
+    local IFS=$'\n'
+    eval "${output[*]}"
+}
+
+stop() {
+    ipt --flush
+    ipt --delete-chain
+    ipt --policy INPUT ACCEPT
+    ipt --policy OUTPUT ACCEPT
+    ipt --policy FORWARD ACCEPT
+    local IFS=$'\n'
+    eval "${output[*]}"
+}
+
+options='start|stop|debug'
+option=${1-start}
+[[ $option =~ $options ]] || flee "Use \"${0##*/} $options [rules-filename]\" (without arguments, \"start\" is default)." 255
+
+script=${2-/etc/lighterwall-rules}
+source "$script" || flee "Unable to use firewall definition file $script." $?
+
+"$option"

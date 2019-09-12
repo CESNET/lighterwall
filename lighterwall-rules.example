@@ -1,0 +1,66 @@
+# IPv4 and IPv6 parameters differences dictionaries
+dict    _icmp_               icmp                    ipv6-icmp
+dict    _icmp_prohibited_    icmp-host-prohibited    icmp6-adm-prohibited
+
+# Lovely ports
+list    _open_web_ports_ 80 443
+list    _open_udp_ports_ 53 123 # DNS, NTP
+
+# Admin group
+list    _admins_
+sub
+    iplist  _bofh_      192.0.2.100  192.0.2.105  2001:DB8::2:100  2001:DB8::2:105
+    iplist  _pfy_       192.0.2.173  2001:DB8::2:173
+endsub
+
+# Nagios
+iplist	_nagios_	198.51.100.62  2001:DB8::100:62
+
+# Web Users
+list    _web_users_     _admins_ _nagios_
+sub
+    iplist	_ceo_		203.0.113.27  2001:DB8::113:27
+    iplist	_sharon_	203.0.113.35  2001:DB8::113:35
+endsub
+
+rules() {
+  # Restrictive policies
+  ipt --policy INPUT DROP
+  ipt --policy FORWARD DROP
+  ipt --policy OUTPUT ACCEPT
+
+  # Administrative and debugging
+  ipt --append INPUT --protocol _icmp_ --jump ACCEPT
+  # Self
+  ipt --append INPUT --in-interface lo --jump ACCEPT
+
+  # TCP
+
+  # Stateless firewall may be more vulnerable to malformed packets, filter some
+  ipt --append INPUT --protocol tcp --tcp-flags SYN,FIN SYN,FIN --jump DROP # SYN-FIN scan
+  ipt --append INPUT --protocol tcp --tcp-flags SYN,RST SYN,RST --jump DROP # SYN-RST scan
+  ipt --append INPUT --protocol tcp --tcp-flags ALL FIN,URG,PSH --jump DROP # X-MAS scan
+  ipt --append INPUT --protocol tcp --tcp-flags ALL FIN --jump DROP         # NMap FIN scan
+  ipt --append INPUT --protocol tcp --tcp-flags ALL NONE --jump DROP        # NULL scan
+  ipt --append INPUT --protocol tcp --tcp-flags ALL ALL --jump DROP         # ALL/ALL scan
+
+  # *** SSH ***
+  ipt --append INPUT --protocol tcp --dport 22 --syn --source _admins_ --jump ACCEPT
+  ipt --append INPUT --protocol tcp --dport 22 --syn --jump LOG --log-prefix "SSH discarded: "
+  ipt --append INPUT --protocol tcp --dport 22 --syn --jump REJECT --reject-with _icmp_prohibited_
+
+  # *** HTTP/S ***
+  ipt --append INPUT --protocol tcp --dport _open_web_ports_ --syn --source _web_users_ --jump ACCEPT
+
+  # Disable other new connections
+  ipt --append INPUT --protocol tcp --syn --jump REJECT --reject-with _icmp_prohibited_
+  # Accept other packets (part of existing communication)
+  ipt --append INPUT --protocol tcp --jump ACCEPT
+
+  # UDP
+  ipt --append INPUT --protocol udp --sport _open_udp_ports_ --jump ACCEPT
+
+  # Disable rest
+  ipt --append INPUT --protocol udp --jump REJECT --reject-with _icmp_prohibited_
+
+}
