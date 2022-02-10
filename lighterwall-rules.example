@@ -47,13 +47,13 @@ rules() {
   # *** SSH ***
   ipt --append INPUT --protocol tcp --dport 22 --syn --source _admins_ --jump ACCEPT
   ipt --append INPUT --protocol tcp --dport 22 --syn --jump LOG --log-prefix "SSH discarded: "
-  ipt --append INPUT --protocol tcp --dport 22 --syn --jump REJECT --reject-with _icmp_prohibited_
+  ipt --append INPUT --protocol tcp --dport 22 --syn --jump DROP
 
   # *** HTTP/S ***
   ipt --append INPUT --protocol tcp --dport _open_web_ports_ --syn --source _web_users_ --jump ACCEPT
 
   # Disable other new connections
-  ipt --append INPUT --protocol tcp --syn --jump REJECT --reject-with _icmp_prohibited_
+  ipt --append INPUT --protocol tcp --syn --jump DROP
   # Accept other packets (part of existing communication)
   ipt --append INPUT --protocol tcp --jump ACCEPT
 
@@ -61,6 +61,6 @@ rules() {
   ipt --append INPUT --protocol udp --sport _open_udp_ports_ --jump ACCEPT
 
   # Disable rest
-  ipt --append INPUT --protocol udp --jump REJECT --reject-with _icmp_prohibited_
+  ipt --append INPUT --protocol udp --jump DROP
 
 }
