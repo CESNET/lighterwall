@@ -29,7 +29,7 @@ flee() {
 
 check_redefinition() {
     if declare -p "_4_$1" >/dev/null 2>&1 || declare -p "_6_$1" >/dev/null 2>&1; then
-        flee "$1 defined multiple times." 252
+        echo -e "Warning: $1 defined multiple times." >&2
     fi
 }
 
